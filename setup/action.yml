@@ -1,0 +1,154 @@
+name: 'Setup Deployagram'
+description: 'Authenticates with Deployagram Cloud, pulls the collector image from ECR, and starts the collector container on a Docker network for use in CI builds.'
+author: 'deployagram'
+
+inputs:
+  client-id:
+    description: 'Deployagram Cognito client ID (DEPLOYAGRAM_CLIENT_ID secret)'
+    required: true
+  username:
+    description: 'Deployagram Cloud username (DEPLOYAGRAM_CLOUD_USERNAME secret)'
+    required: true
+  password:
+    description: 'Deployagram Cloud password (DEPLOYAGRAM_CLOUD_PASSWORD secret)'
+    required: true
+  license-key:
+    description: 'Deployagram license key (DEPLOYAGRAM_LICENSE_KEY secret)'
+    required: true
+  license:
+    description: 'Deployagram license (DEPLOYAGRAM_LICENSE secret)'
+    required: true
+  aws-region:
+    description: 'AWS region for Cognito auth and ECR'
+    required: false
+    default: 'eu-west-2'
+  ecr-registry:
+    description: 'ECR registry hostname holding the Deployagram images'
+    required: false
+    default: '325701203566.dkr.ecr.eu-west-2.amazonaws.com'
+  collector-image-tag:
+    description: 'Image tag (within deployagram-docker) for the collector'
+    required: false
+    default: 'deployagram-collector-multi-latest'
+  proxy-image-tag:
+    description: 'Image tag (within deployagram-docker) for the HTTP diagramming proxy'
+    required: false
+    default: 'http-diagramming-proxy-multi-latest'
+  pull-proxy-image:
+    description: 'Whether to also pull the HTTP diagramming proxy image'
+    required: false
+    default: 'true'
+  network-name:
+    description: 'Name of the Docker network to create for Deployagram containers'
+    required: false
+    default: 'deployagram'
+  collector-container-name:
+    description: 'Name/network-alias for the collector container'
+    required: false
+    default: 'diagram-logger'
+  collector-port:
+    description: 'Host port to publish the collector on (container port 8080)'
+    required: false
+    default: '1152'
+
+outputs:
+  token:
+    description: 'JWT obtained from Cognito, for calling Deployagram Cloud APIs later in the workflow'
+    value: ${{ steps.jwt.outputs.token }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Get JWT from Cognito
+      id: jwt
+      shell: bash
+      env:
+        DEPLOYAGRAM_CLIENT_ID: ${{ inputs.client-id }}
+        DEPLOYAGRAM_CLOUD_USERNAME: ${{ inputs.username }}
+        DEPLOYAGRAM_CLOUD_PASSWORD: ${{ inputs.password }}
+        AWS_REGION: ${{ inputs.aws-region }}
+      run: |
+        set -euo pipefail
+        JWT_TOKEN=$(aws cognito-idp initiate-auth \
+          --client-id "$DEPLOYAGRAM_CLIENT_ID" \
+          --auth-flow USER_PASSWORD_AUTH \
+          --auth-parameters USERNAME="${DEPLOYAGRAM_CLOUD_USERNAME}",PASSWORD="${DEPLOYAGRAM_CLOUD_PASSWORD}" \
+          --region "$AWS_REGION" \
+          | jq -r '.AuthenticationResult.IdToken')
+
+        if [[ -z "${JWT_TOKEN}" || "${JWT_TOKEN}" == "null" ]]; then
+          echo "Failed to obtain JWT from Cognito" >&2
+          exit 1
+        fi
+
+        echo "::add-mask::${JWT_TOKEN}"
+        echo "token=${JWT_TOKEN}" >> "$GITHUB_OUTPUT"
+
+    - name: Exchange JWT for ECR password, login and pull images
+      shell: bash
+      env:
+        ECR_REGISTRY: ${{ inputs.ecr-registry }}
+        COLLECTOR_IMAGE_TAG: ${{ inputs.collector-image-tag }}
+        PROXY_IMAGE_TAG: ${{ inputs.proxy-image-tag }}
+        PULL_PROXY_IMAGE: ${{ inputs.pull-proxy-image }}
+        TOKEN: ${{ steps.jwt.outputs.token }}
+      run: |
+        set -euo pipefail
+        PASSWORD=$(curl -sS -H "Authorization: Bearer ${TOKEN}" \
+          "https://jtjabaluo5.execute-api.eu-west-2.amazonaws.com/registry/token" \
+          | jq -r '.password')
+
+        if [[ -z "${PASSWORD}" || "${PASSWORD}" == "null" ]]; then
+          echo "Failed to obtain ECR password" >&2
+          exit 1
+        fi
+
+        echo "::add-mask::${PASSWORD}"
+        echo "${PASSWORD}" | docker login -u AWS --password-stdin "${ECR_REGISTRY}"
+
+        docker pull "${ECR_REGISTRY}/deployagram-docker:${COLLECTOR_IMAGE_TAG}"
+        if [[ "${PULL_PROXY_IMAGE}" == "true" ]]; then
+          docker pull "${ECR_REGISTRY}/deployagram-docker:${PROXY_IMAGE_TAG}"
+        fi
+
+    - name: Create Docker Network for DEPLOYAGRAM
+      shell: bash
+      env:
+        NETWORK_NAME: ${{ inputs.network-name }}
+      run: |
+        set -euo pipefail
+        docker network create "${NETWORK_NAME}"
+
+    - name: Start DEPLOYAGRAM Collector
+      shell: bash
+      env:
+        DEPLOYAGRAM_CLIENT_ID: ${{ inputs.client-id }}
+        DEPLOYAGRAM_CLOUD_USERNAME: ${{ inputs.username }}
+        DEPLOYAGRAM_CLOUD_PASSWORD: ${{ inputs.password }}
+        DEPLOYAGRAM_LICENSE_KEY: ${{ inputs.license-key }}
+        DEPLOYAGRAM_LICENSE: ${{ inputs.license }}
+        ECR_REGISTRY: ${{ inputs.ecr-registry }}
+        COLLECTOR_IMAGE_TAG: ${{ inputs.collector-image-tag }}
+        NETWORK_NAME: ${{ inputs.network-name }}
+        CONTAINER_NAME: ${{ inputs.collector-container-name }}
+        COLLECTOR_PORT: ${{ inputs.collector-port }}
+      run: |
+        set -euo pipefail
+        docker run \
+          -d \
+          --name "${CONTAINER_NAME}" \
+          --network "${NETWORK_NAME}" \
+          --network-alias "${CONTAINER_NAME}" \
+          -p "${COLLECTOR_PORT}:8080" \
+          -e DEPLOYAGRAM_CLIENT_ID="$DEPLOYAGRAM_CLIENT_ID" \
+          -e DEPLOYAGRAM_CLOUD_USERNAME="$DEPLOYAGRAM_CLOUD_USERNAME" \
+          -e DEPLOYAGRAM_CLOUD_PASSWORD="$DEPLOYAGRAM_CLOUD_PASSWORD" \
+          -e DEPLOYAGRAM_LICENSE_KEY="$DEPLOYAGRAM_LICENSE_KEY" \
+          -e DEPLOYAGRAM_LICENSE="$DEPLOYAGRAM_LICENSE" \
+          "${ECR_REGISTRY}/deployagram-docker:${COLLECTOR_IMAGE_TAG}"
+
+        echo "DEPLOYAGRAM_COLLECTOR_URL=http://localhost:${COLLECTOR_PORT}" >> "$GITHUB_ENV"
+
+branding:
+  icon: 'box'
+  color: 'blue'

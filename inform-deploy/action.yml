@@ -1,0 +1,82 @@
+name: 'Deployagram: Inform Deploy'
+description: 'Tells Deployagram Cloud that a version of a container has been deployed to an environment.'
+author: 'deployagram'
+
+inputs:
+  token:
+    description: 'JWT for Deployagram Cloud (e.g. from the setup action output)'
+    required: true
+  container:
+    description: 'Container that was deployed'
+    required: true
+  version:
+    description: 'Version deployed (e.g. github.run_number)'
+    required: true
+  environment:
+    description: 'Environment deployed to'
+    required: false
+    default: 'Prod'
+  deployment-time:
+    description: 'ISO-8601 UTC timestamp (e.g. 2026-09-08T21:04:00Z). Defaults to now.'
+    required: false
+    default: ''
+  api-base-url:
+    description: 'Base URL of the Deployagram Cloud contract API'
+    required: false
+    default: 'https://4sbxg7dfng.execute-api.eu-west-2.amazonaws.com/Prod'
+  fail-on-error:
+    description: 'Fail the step if Deployagram Cloud does not return a 2xx response'
+    required: false
+    default: 'true'
+
+outputs:
+  status:
+    description: 'HTTP status code returned by Deployagram Cloud'
+    value: ${{ steps.inform.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Inform Deployagram Cloud of deploy
+      id: inform
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.token }}
+        CONTAINER: ${{ inputs.container }}
+        VERSION: ${{ inputs.version }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        DEPLOYMENT_TIME: ${{ inputs.deployment-time }}
+        API_BASE_URL: ${{ inputs.api-base-url }}
+        FAIL_ON_ERROR: ${{ inputs.fail-on-error }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "${TOKEN}" || "${TOKEN}" == "null" ]]; then
+          echo "❌ Missing JWT token (inputs.token)." >&2
+          exit 1
+        fi
+
+        DEPLOYMENT_TIME="${DEPLOYMENT_TIME:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
+
+        PAYLOAD=$(jq -n \
+          --arg container "${CONTAINER}" \
+          --arg version "${VERSION}" \
+          --arg environment "${ENVIRONMENT}" \
+          --arg deploymentTime "${DEPLOYMENT_TIME}" \
+          '{container: $container, version: $version, environment: $environment, deploymentTime: $deploymentTime}')
+
+        echo "Deploying application..."
+        STATUS=$(curl -s -o response.txt -w "%{http_code}" -X POST "${API_BASE_URL}/contract/deploy/container" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H "Content-Type: application/json" \
+          -d "${PAYLOAD}")
+
+        echo "Deployment completed with status: ${STATUS}"
+        echo "Response body:"
+        cat response.txt
+        echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
+
+        if [[ "${FAIL_ON_ERROR}" == "true" && ( "${STATUS}" -lt 200 || "${STATUS}" -ge 300 ) ]]; then
+          echo "❌ Inform deploy failed with status ${STATUS}" >&2
+          exit 1
+        fi

@@ -1,0 +1,79 @@
+name: 'Deployagram: Contract Check'
+description: 'Calls Deployagram Cloud to check whether a build satisfies its recorded contracts.'
+author: 'deployagram'
+
+inputs:
+  token:
+    description: 'JWT for Deployagram Cloud (e.g. from the setup action output)'
+    required: true
+  container:
+    description: 'Container under test'
+    required: true
+  build-id:
+    description: 'Build identifier (e.g. github.run_number)'
+    required: true
+  environment:
+    description: 'Environment the contract is being checked against'
+    required: false
+    default: 'Prod'
+  timestamp:
+    description: 'ISO-8601 UTC timestamp (e.g. 2026-09-08T21:04:00Z). Defaults to now.'
+    required: false
+    default: ''
+  api-base-url:
+    description: 'Base URL of the Deployagram Cloud contract API'
+    required: false
+    default: 'https://4sbxg7dfng.execute-api.eu-west-2.amazonaws.com/Prod'
+
+outputs:
+  status:
+    description: 'HTTP status code returned by Deployagram Cloud'
+    value: ${{ steps.check.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Contract check
+      id: check
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.token }}
+        CONTAINER: ${{ inputs.container }}
+        BUILD_ID: ${{ inputs.build-id }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        TIMESTAMP: ${{ inputs.timestamp }}
+        API_BASE_URL: ${{ inputs.api-base-url }}
+      run: |
+        set -euo pipefail
+
+        if [[ -z "${TOKEN}" || "${TOKEN}" == "null" ]]; then
+          echo "❌ Missing JWT token (inputs.token)." >&2
+          exit 1
+        fi
+
+        TIMESTAMP="${TIMESTAMP:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
+
+        PAYLOAD=$(jq -n \
+          --arg container "${CONTAINER}" \
+          --arg buildId "${BUILD_ID}" \
+          --arg environment "${ENVIRONMENT}" \
+          --arg timestamp "${TIMESTAMP}" \
+          '{container: $container, buildId: $buildId, environment: $environment, timestamp: $timestamp}')
+
+        echo "Calling API for Contract Check"
+        STATUS=$(curl -s -o response.txt -w "%{http_code}" -X POST "${API_BASE_URL}/contract/check/container" \
+          -H "Authorization: Bearer ${TOKEN}" \
+          -H "Content-Type: application/json" \
+          -d "${PAYLOAD}")
+
+        echo "Status code: ${STATUS}"
+        echo "Response body:"
+        jq . response.txt || cat response.txt
+        echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
+
+        if [[ "${STATUS}" -ne 200 ]]; then
+          echo "❌ Contract Check failed with status ${STATUS}" >&2
+          exit 1
+        else
+          echo "✅ Contract Check passed"
+        fi

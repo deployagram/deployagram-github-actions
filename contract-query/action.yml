@@ -1,0 +1,71 @@
+name: 'Deployagram: Contract Query'
+description: 'Asks the Deployagram Collector to run a contract check for a container against Deployagram Cloud, using the latest test run it has captured.'
+author: 'deployagram'
+
+inputs:
+  container:
+    description: 'Container under test (maps to containerUnderTest)'
+    required: true
+  test-run-id:
+    description: 'Identifier for the test run being checked (e.g. github.run_number)'
+    required: true
+  environment:
+    description: 'Environment the contract is being checked against'
+    required: false
+    default: 'Prod'
+  query-time:
+    description: 'ISO-8601 UTC timestamp (e.g. 2026-09-08T21:04:00Z). Defaults to now.'
+    required: false
+    default: ''
+  collector-url:
+    description: 'Base URL of the running Deployagram Collector. Defaults to $DEPLOYAGRAM_COLLECTOR_URL (set by the setup action) or http://localhost:1152'
+    required: false
+    default: ''
+  fail-on-error:
+    description: 'Fail the step if the collector does not return a 2xx response'
+    required: false
+    default: 'true'
+
+outputs:
+  status:
+    description: 'HTTP status code returned by the collector'
+    value: ${{ steps.query.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Contract query
+      id: query
+      shell: bash
+      env:
+        CONTAINER: ${{ inputs.container }}
+        TEST_RUN_ID: ${{ inputs.test-run-id }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        QUERY_TIME: ${{ inputs.query-time }}
+        INPUT_COLLECTOR_URL: ${{ inputs.collector-url }}
+        FAIL_ON_ERROR: ${{ inputs.fail-on-error }}
+      run: |
+        set -euo pipefail
+        URL="${INPUT_COLLECTOR_URL:-${DEPLOYAGRAM_COLLECTOR_URL:-http://localhost:1152}}"
+        QUERY_TIME="${QUERY_TIME:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
+
+        PAYLOAD=$(jq -n \
+          --arg containerUnderTest "${CONTAINER}" \
+          --arg testRunId "${TEST_RUN_ID}" \
+          --arg environment "${ENVIRONMENT}" \
+          --arg queryTime "${QUERY_TIME}" \
+          '{containerUnderTest: $containerUnderTest, testRunId: $testRunId, environment: $environment, queryTime: $queryTime}')
+
+        STATUS=$(curl -s -o response.txt -w "%{http_code}" -X POST "${URL}/run/contractQuery" \
+          -H "Content-Type: application/json" \
+          -d "${PAYLOAD}")
+
+        echo "Status code: ${STATUS}"
+        echo "Response body:"
+        cat response.txt
+        echo "status=${STATUS}" >> "$GITHUB_OUTPUT"
+
+        if [[ "${FAIL_ON_ERROR}" == "true" && ( "${STATUS}" -lt 200 || "${STATUS}" -ge 300 ) ]]; then
+          echo "❌ Contract query failed with status ${STATUS}" >&2
+          exit 1
+        fi
