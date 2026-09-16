@@ -50,6 +50,10 @@ inputs:
     description: 'Host port to publish the collector on (container port 8080)'
     required: false
     default: '1152'
+  collector-extra-env:
+    description: 'Extra environment variables for the Collector container, one KEY=VALUE per line, e.g. KAFKA_BROKER_LOCATION_MODE=RUNTIME'
+    required: false
+    default: ''
 
 outputs:
   token:
@@ -132,8 +136,16 @@ runs:
         NETWORK_NAME: ${{ inputs.network-name }}
         CONTAINER_NAME: ${{ inputs.collector-container-name }}
         COLLECTOR_PORT: ${{ inputs.collector-port }}
+        COLLECTOR_EXTRA_ENV: ${{ inputs.collector-extra-env }}
       run: |
         set -euo pipefail
+
+        EXTRA_ENV_ARGS=()
+        while IFS= read -r line; do
+          [[ -z "${line}" ]] && continue
+          EXTRA_ENV_ARGS+=(-e "${line}")
+        done <<< "${COLLECTOR_EXTRA_ENV}"
+
         docker run \
           -d \
           --name "${CONTAINER_NAME}" \
@@ -145,6 +157,7 @@ runs:
           -e DEPLOYAGRAM_CLOUD_PASSWORD="$DEPLOYAGRAM_CLOUD_PASSWORD" \
           -e DEPLOYAGRAM_LICENSE_KEY="$DEPLOYAGRAM_LICENSE_KEY" \
           -e DEPLOYAGRAM_LICENSE="$DEPLOYAGRAM_LICENSE" \
+          "${EXTRA_ENV_ARGS[@]}" \
           "${ECR_REGISTRY}/deployagram-docker:${COLLECTOR_IMAGE_TAG}"
 
         echo "DEPLOYAGRAM_COLLECTOR_URL=http://localhost:${COLLECTOR_PORT}" >> "$GITHUB_ENV"

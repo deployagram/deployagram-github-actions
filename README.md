@@ -33,6 +33,9 @@ Composite GitHub Actions that replace the CI boilerplate needed to use [Deployag
     license-key: ${{ secrets.DEPLOYAGRAM_LICENSE_KEY }}
     license: ${{ secrets.DEPLOYAGRAM_LICENSE }}
     # collector-port: '1152'   # optional, see setup/action.yml for all inputs
+    # collector-extra-env: |   # optional, one KEY=VALUE per line, passed as -e to the Collector container
+    #   KAFKA_BROKER_LOCATION_MODE=RUNTIME
+    #   SCHEMA_REGISTRY_LOCATION_MODE=RUNTIME
 
 - name: Build with Maven
   env:
